@@ -1,0 +1,71 @@
+### KILL SESSIONS ULTIMAS 24 HORAS 
+DECLARE @user_spid INT
+DECLARE CurSPID CURSOR FAST_FORWARD
+FOR
+SELECT SPID
+FROM master.dbo.sysprocesses (NOLOCK)
+WHERE spid>50 -- avoid system threads
+AND status='sleeping' -- only sleeping threads
+AND DATEDIFF(HOUR,last_batch,GETDATE())>=24 -- thread sleeping for 24 hours
+AND spid<>@@spid -- ignore current spid
+OPEN CurSPID
+FETCH NEXT FROM CurSPID INTO @user_spid
+WHILE (@@FETCH_STATUS=0)
+BEGIN
+PRINT 'Killing '+CONVERT(VARCHAR,@user_spid)
+EXEC('KILL '+@user_spid)
+FETCH NEXT FROM CurSPID INTO @user_spid
+END
+CLOSE CurSPID
+DEALLOCATE CurSPID
+GO
+
+-------------------------------------------------------
+### KILL SESSIONS ULTIMAS 5 HORAS 
+DECLARE @sql NVARCHAR(MAX) = N'';
+
+SELECT @sql += N'KILL ' + CONVERT(VARCHAR(11), session_id) + N';'
+FROM sys.dm_exec_sessions
+  WHERE [program_name] = N'app_name'
+  AND login_name = N'login_name'
+  AND last_request_start_time < DATEADD(HOUR, -5, SYSDATETIME());
+
+EXEC sys.sp_executesql @sql;
+
+------------------------------------------------------------
+### KILL SESSIONS FROM ALL HOSTS
+
+SET @host = 'fooHost'; --NULL to kill sessions from all hosts.
+SET @login = 'fooLogin';
+
+DECLARE @cmd NVARCHAR(255);
+DECLARE @possition INT, @total INT, @selSpid SMALLINT;
+DECLARE @spidInfo TABLE
+(
+    [id] INT IDENTITY(1,1),
+    spid SMALLINT,
+    loginame NVARCHAR(128)
+);
+
+INSERT @spidInfo(spid, loginame)
+SELECT session_id, login_name 
+FROM sys.dm_exec_sessions
+WHERE is_user_process = 1 AND [status] = 'sleeping' AND 
+    login_name = @login AND [host_name] = COALESCE(@host, [host_name]);
+
+SELECT @total = @@IDENTITY, @selSpid = 0, @possition = 0;
+
+WHILE @possition < @total
+    BEGIN
+        SELECT TOP 1 @selSpid = spid, @possition = [id]
+        FROM @spidInfo
+        WHERE [ID] > @possition
+
+        SET @cmd = N'KILL ' + CAST(@selSpid AS NVARCHAR(10));
+        EXEC sp_executesql @cmd;
+        PRINT 'SessionId = ' + CAST(@selSpid AS NVARCHAR(10)) + '[' + @login + 
+            '] killed by ' + system_user + ' at ' + CAST(GETDATE() AS VARCHAR(50));
+    END;
+
+IF (@total = 0)
+    PRINT 'No sessions owned by user ' + '[' + @login + ']';

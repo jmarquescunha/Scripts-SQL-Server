@@ -1,0 +1,53 @@
+SET QUOTED_IDENTIFIER ON
+GO
+DECLARE @ts_now bigint;
+DECLARE @record_id bigint;
+DECLARE @EventTime datetime;
+DECLARE @system_cpu_utilization bigint;
+DECLARE @sql_cpu_utilization bigint;
+SELECT @ts_now = cpu_ticks / (cpu_ticks/ms_ticks)  FROM sys.dm_os_sys_info;
+
+SELECT top 1 
+       @record_id = record_id
+     , @EventTime = EventTime
+     , @system_cpu_utilization = CASE WHEN system_cpu_utilization_post_sp2 IS NOT NULL THEN system_cpu_utilization_post_sp2 ELSE system_cpu_utilization_pre_sp2 END 
+     , @sql_cpu_utilization = CASE WHEN sql_cpu_utilization_post_sp2 IS NOT NULL THEN sql_cpu_utilization_post_sp2 ELSE sql_cpu_utilization_pre_sp2 END
+FROM  
+( 
+  SELECT  
+    record.value('(Record/@id)[1]', 'int') AS record_id, 
+    DATEADD (ms, -1 * (@ts_now - [timestamp]), GETDATE()) AS EventTime, 
+    100-record.value('(Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') AS system_cpu_utilization_post_sp2, 
+    record.value('(Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') AS sql_cpu_utilization_post_sp2 ,  
+    100-record.value('(Record/SchedluerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') AS system_cpu_utilization_pre_sp2, 
+    record.value('(Record/SchedluerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') AS sql_cpu_utilization_pre_sp2 
+  FROM ( 
+    SELECT timestamp, CONVERT (xml, record) AS record  
+    FROM sys.dm_os_ring_buffers  
+    WHERE ring_buffer_type = 'RING_BUFFER_SCHEDULER_MONITOR' 
+      AND record LIKE '%<SystemHealth>%') AS t 
+) AS t 
+ORDER BY record_id desc;
+
+WITH DB_CPU_Stats
+AS
+(SELECT DatabaseID, DB_Name(DatabaseID) AS [DatabaseName], 
+  SUM(total_worker_time) AS [CPU_Time_Ms]
+ FROM sys.dm_exec_query_stats AS qs
+ CROSS APPLY (SELECT CONVERT(int, value) AS [DatabaseID] 
+              FROM sys.dm_exec_plan_attributes(qs.plan_handle)
+              WHERE attribute = N'dbid') AS F_DB
+ GROUP BY DatabaseID)
+--INSERT INTO _DB_Adm..DBHistorico_CPU_DBs
+SELECT GETDATE() DataColeta
+     ,  ROW_NUMBER() OVER(ORDER BY [CPU_Time_Ms] DESC) AS [row_num]
+     , DatabaseName
+     , [CPU_Time_Ms]
+     , CAST([CPU_Time_Ms] * 1.0 / SUM([CPU_Time_Ms]) OVER() * 100.0 AS DECIMAL(5, 2)) AS [CPUPercent]
+     , @system_cpu_utilization System_CPU_Utilization
+     , @sql_cpu_utilization SQL_CPU_Utilization
+FROM DB_CPU_Stats
+WHERE DatabaseID > 4 -- system databases
+AND DatabaseID <> 32767 -- ResourceDB
+ORDER BY row_num OPTION (RECOMPILE)
+GO
